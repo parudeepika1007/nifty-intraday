@@ -1,0 +1,3 @@
+Dashboard on http://localhost:8777  (Ctrl+C to stop)
+C:\Users\HP\Documents\PNR\Earn\nifty-intraday\src\instruments.py:36: DtypeWarning: Columns (0: SEM_SERIES, 1: SM_SYMBOL_NAME) have mixed types. Specify dtype option on import or set low_memory=False.
+  return pd.read_csv(StringIO(r.text))
