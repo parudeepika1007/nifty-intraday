@@ -47,7 +47,13 @@ CLOSE_POS_MIN = 0.70
 # extension cap (the S5 climax-fade fix): skip entries that are already late
 EXT_MAX = 2.0        # close must be within 2*ATR of EMA20 (not over-extended)
 BODY_ATR_MAX = 2.5   # skip blow-off candles bigger than 2.5*ATR
-COST_POINTS = 2.0    # assumed futures round-trip cost (slippage+fees) in index pts
+COST_POINTS = 2.0    # assumed FUTURES round-trip cost (slippage+fees) in index pts
+# option-buying cost model (premium rupees per share, round-trip over ~30-min hold)
+OPT_SPREAD_RS = 2.0  # bid-ask paid crossing in and out (ATM weekly, non-expiry)
+OPT_FEES_RS = 1.0    # brokerage + STT + exchange + GST, per share
+OPT_THETA_RS = 2.0   # time-decay bled over the ~30-min hold (non-expiry ATM)
+ATM_DELTA = 0.50     # an ATM option captures ~half the index move
+ITM_DELTA = 0.70     # an ITM option captures ~0.7 of it
 ENTRY_START = dt.time(9, 30)
 ENTRY_END = dt.time(15, 0)
 SQUARE_OFF = dt.time(15, 20)
@@ -195,28 +201,128 @@ def simulate(df: pd.DataFrame, exit_style: str) -> pd.DataFrame:
 
 
 def stats(tr: pd.DataFrame, cost_points: float = 0.0) -> dict:
+    """All results in R (multiples of risk). cost_points is charged per trade,
+    scaled by each trade's stop distance (so it bites tight-stop trades harder)."""
     if tr.empty:
-        return {"n": 0, "win%": 0, "expR": 0, "totR": 0, "pf": 0}
+        return dict(n=0, win=0, exp=0, tot=0, pf=0, aw=0, al=0, best=0, worst=0)
     r = tr["R"] - (cost_points / tr["risk_pts"] if cost_points else 0.0)
     wins, losses = r[r > 0], r[r <= 0]
     gl = -losses.sum()
-    return {"n": len(r), "win%": len(wins) / len(r) * 100,
-            "expR": r.mean(), "totR": r.sum(),
-            "pf": (wins.sum() / gl) if gl > 0 else float("inf")}
+    return dict(n=len(r), win=len(wins) / len(r) * 100, exp=r.mean(), tot=r.sum(),
+                pf=(wins.sum() / gl) if gl > 0 else float("inf"),
+                aw=wins.mean() if len(wins) else 0.0,
+                al=losses.mean() if len(losses) else 0.0,
+                best=r.max(), worst=r.min())
 
 
-def _row(label: str, st: dict) -> str:
-    return (f"{label:14} n={st['n']:5d}  win={st['win%']:5.1f}%  "
-            f"exp={st['expR']:+.3f}R  PF={st['pf']:4.2f}  total={st['totR']:+7.1f}R")
+def opt_cost_pts(delta: float) -> float:
+    """Option-buying friction expressed in INDEX-equivalent points.
+
+    Buying an option with delta D gives only D of the index exposure, so to
+    match one futures' directional bet you carry 1/D options — and pay the
+    premium friction (spread+fees+theta) on each. Hence the effective cost per
+    unit of index exposure = friction / D. Theta and wide option spreads make
+    this MUCH larger than the futures' ~2 pts — the key, counter-intuitive point.
+    """
+    return (OPT_SPREAD_RS + OPT_FEES_RS + OPT_THETA_RS) / delta
 
 
-def _oos(tr: pd.DataFrame, cost: float) -> None:
-    days = np.sort(tr["date"].unique())
-    cut = days[int(len(days) * 0.8)]
-    ins, oos = tr[tr["date"] < cut], tr[tr["date"] >= cut]
-    print(f"  walk-forward (cut {cut}, net):")
-    print("   " + _row("in-sample", stats(ins, cost)))
-    print("   " + _row("out-sample", stats(oos, cost)))
+def line(label: str, st: dict) -> str:
+    pf = " inf" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+    return (f"  {label:24} trades {st['n']:4d} | win {st['win']:5.1f}% | "
+            f"avg {st['exp']:+.3f}R | PF {pf:>4} | total {st['tot']:+7.1f}R")
+
+
+def report(df: pd.DataFrame, tr: pd.DataFrame, best_exit: str,
+           comparison: dict[str, pd.DataFrame]) -> None:
+    days = df["date"].nunique()
+    nsig = int((df["sig"] != 0).sum())
+    bar = "=" * 74
+    print(bar)
+    print("  NIFTY 3-min EMA-RIBBON MOMENTUM  —  BACKTEST REPORT")
+    print(bar)
+    print(f"  Period   : {df['ts_minute'].min().date()}  ->  {df['ts_minute'].max().date()}   ({days} trading days)")
+    print(f"  Data     : {len(df):,} three-min bars, resampled from 1-min NIFTY spot")
+    print(f"  Signals  : {nsig}  (long {int((df['sig']==1).sum())}, short "
+          f"{int((df['sig']==-1).sum())})   ~{nsig/days:.1f} per day")
+    print()
+    print("  THE RULE (plain English)")
+    print("    Go LONG when the EMA ribbon (10>20>50) is stacked, EMA20 is sloping")
+    print("    up, and the ribbon is fanned wide, AND a strong green candle closes")
+    print("    after a small dip back to EMA20.  SHORT is the mirror.")
+    print("    Enter next bar's open.  Stop = the candle's extreme (that risk = 1R).")
+    print(f"    Exit after 30 min or 15:20 IST  ('{best_exit}' beat the other exits).")
+    print()
+
+    g = stats(tr)
+    print("  " + "-" * 70)
+    print("  GROSS RESULT  (before any trading costs)")
+    print("  " + "-" * 70)
+    print(line("ALL trades", g))
+    print(f"    avg winner {g['aw']:+.2f}R   avg loser {g['al']:+.2f}R   "
+          f"best {g['best']:+.1f}R   worst {g['worst']:+.1f}R")
+    print(line("long only", stats(tr[tr.side == "long"])))
+    print(line("short only", stats(tr[tr.side == "short"])))
+    print()
+
+    print("  " + "-" * 70)
+    print("  NET OF COSTS  —  this is what you actually keep")
+    print("  " + "-" * 70)
+    print("  If trading FUTURES (round-trip ~2 index pts of slippage+fees):")
+    print(line("futures, net", stats(tr, COST_POINTS)))
+    print()
+    fric = OPT_SPREAD_RS + OPT_FEES_RS + OPT_THETA_RS
+    atm, itm = opt_cost_pts(ATM_DELTA), opt_cost_pts(ITM_DELTA)
+    print("  If BUYING OPTIONS (ATM / ITM) — your intended way to trade:")
+    print(f"    premium friction = Rs{OPT_SPREAD_RS:.0f} spread + Rs{OPT_FEES_RS:.0f} fees + "
+          f"Rs{OPT_THETA_RS:.0f} theta(30min) = Rs{fric:.0f}/round-trip")
+    print(f"    ATM delta {ATM_DELTA:.2f}  ->  effective cost = Rs{fric:.0f} / {ATM_DELTA:.2f} = "
+          f"{atm:.1f} index-equiv pts")
+    print(line("ATM option, net", stats(tr, atm)))
+    print(f"    ITM delta {ITM_DELTA:.2f}  ->  effective cost = Rs{fric:.0f} / {ITM_DELTA:.2f} = "
+          f"{itm:.1f} index-equiv pts")
+    print(line("ITM option, net", stats(tr, itm)))
+    print("    (note: this linear model ignores gamma/convexity, which would help")
+    print("     the rare BIG fast winners; for tight 30-min scalps theta dominates.")
+    print("     True option P&L needs historical option prices we don't have.)")
+    print()
+
+    print("  " + "-" * 70)
+    print("  ROBUSTNESS  (net of futures cost, 80/20 split by date)")
+    print("  " + "-" * 70)
+    d = np.sort(tr["date"].unique())
+    cut = d[int(len(d) * 0.8)]
+    print(line(f"in-sample  (< {cut})", stats(tr[tr.date < cut], COST_POINTS)))
+    print(line(f"out-sample (>= {cut})", stats(tr[tr.date >= cut], COST_POINTS)))
+    print()
+
+    print("  " + "-" * 70)
+    print("  EXIT-STYLE COMPARISON  (gross, how we chose the exit)")
+    print("  " + "-" * 70)
+    for st, t in comparison.items():
+        mark = "  <- chosen" if st == best_exit else ""
+        print(line(st, stats(t)) + mark)
+    print()
+
+    fut = stats(tr, COST_POINTS)
+    print(bar)
+    print("  VERDICT")
+    if fut["exp"] > 0.01 and fut["pf"] > 1.05:
+        print("  Positive net edge on futures — worth refining / forward-testing.")
+    else:
+        print("  REJECTED. The gross edge is too thin to survive costs.")
+        print(f"  Futures net: {fut['exp']:+.3f}R/trade (PF {fut['pf']:.2f}) — loses money.")
+        print("  Option BUYING is WORSE, not better: theta + wide option spreads,")
+        print(f"  divided by sub-1 delta, give ~{atm:.0f} index-pts of friction vs 2 for")
+        print("  futures. Buying ATM/ITM does not rescue a weak directional signal.")
+    print(bar)
+    print("  WHAT THE NUMBERS MEAN")
+    print("   R       multiples of risk.  -1R = stop hit.  +2R = made twice your risk.")
+    print("   win%    share of trades that ended in profit.")
+    print("   avg R   expectancy: average profit per trade in R.  THIS is the edge.")
+    print("   PF      profit factor = total wins / total losses.  >1 makes money.")
+    print("   total R sum of every trade's result — the 2-year P&L in risk-units.")
+    print(bar)
 
 
 def main() -> None:
@@ -224,51 +330,10 @@ def main() -> None:
     base_df = load_3min(con)
     con.close()
     base = add_features(base_df.copy())
-    print(f"3-min bars: {len(base):,}  ({base['ts_minute'].min()} -> {base['ts_minute'].max()})")
-
-    # 1) baseline exit-style comparison (gross)
-    print(f"\nBASELINE  signals={(base['sig']!=0).sum()}  "
-          f"(long {(base['sig']==1).sum()} / short {(base['sig']==-1).sum()})")
-    print("Exit-style comparison (gross, 1R = risk to stop):")
-    print("=" * 70)
-    results = {st: simulate(base, st) for st in ("r2_ema", "ema_trail", "timebox")}
-    for st, tr in results.items():
-        print(_row(st, stats(tr)))
-    best = max((k for k in results if len(results[k]) >= 100),
-               key=lambda k: stats(results[k])["expR"])
-    print(f"-> best exit: '{best}'")
-
-    # 2) extension-capped variant on the best exit
-    capped = add_features(base_df.copy(), ext_max=EXT_MAX, body_atr_max=BODY_ATR_MAX)
-    tr_b, tr_c = results[best], simulate(capped, best)
-    print(f"\nEXTENSION CAP  (close within {EXT_MAX}*ATR of EMA20, body<= {BODY_ATR_MAX}*ATR)")
-    print(f"signals={(capped['sig']!=0).sum()}  on exit '{best}':")
-    print("=" * 70)
-    print(_row("baseline gross", stats(tr_b)))
-    print(_row("capped  gross", stats(tr_c)))
-    print(_row(f"baseline net@{COST_POINTS}", stats(tr_b, COST_POINTS)))
-    print(_row(f"capped  net@{COST_POINTS}", stats(tr_c, COST_POINTS)))
-
-    # 3) cost sensitivity on the capped variant
-    print(f"\nCost sensitivity (capped, '{best}'):")
-    print("-" * 70)
-    for cp in (0.0, 1.0, 2.0, 3.0, 4.0):
-        print(_row(f"cost {cp:.0f} pts", stats(tr_c, cp)))
-
-    # 4) per-side + strength quintile + OOS, all NET of cost, capped
-    print(f"\nCapped, net @ {COST_POINTS} pts:")
-    print("-" * 70)
-    for side in ("long", "short"):
-        print(_row(side, stats(tr_c[tr_c["side"] == side], COST_POINTS)))
-    g = tr_c.copy()
-    g["strength"] = g["body_atr"] * g["fan"]
-    g["q"] = pd.qcut(g["strength"], 5, labels=["S1", "S2", "S3", "S4", "S5"],
-                     duplicates="drop")
-    print("  strength quintile (body_atr x fan):")
-    for q, gg in g.groupby("q", observed=True):
-        print("   " + _row(str(q), stats(gg, COST_POINTS)))
-    print()
-    _oos(tr_c, COST_POINTS)
+    comparison = {st: simulate(base, st) for st in ("r2_ema", "ema_trail", "timebox")}
+    best = max((k for k in comparison if len(comparison[k]) >= 100),
+               key=lambda k: stats(comparison[k])["exp"])
+    report(base, comparison[best], best, comparison)
 
 
 if __name__ == "__main__":
