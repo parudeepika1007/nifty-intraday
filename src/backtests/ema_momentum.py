@@ -44,6 +44,10 @@ FAN_MIN = 0.50     # (EMA10-EMA50) must span >= 0.50*ATR
 BODY_ATR_MIN = 1.2
 BODY_RATIO_MIN = 0.60
 CLOSE_POS_MIN = 0.70
+# extension cap (the S5 climax-fade fix): skip entries that are already late
+EXT_MAX = 2.0        # close must be within 2*ATR of EMA20 (not over-extended)
+BODY_ATR_MAX = 2.5   # skip blow-off candles bigger than 2.5*ATR
+COST_POINTS = 2.0    # assumed futures round-trip cost (slippage+fees) in index pts
 ENTRY_START = dt.time(9, 30)
 ENTRY_END = dt.time(15, 0)
 SQUARE_OFF = dt.time(15, 20)
@@ -70,7 +74,8 @@ def load_3min(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return df3
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_features(df: pd.DataFrame, *, ext_max: float | None = None,
+                 body_atr_max: float | None = None) -> pd.DataFrame:
     c, h, l, o = df["close"], df["high"], df["low"], df["open"]
     for n in (10, 20, 50, 200):
         df[f"ema{n}"] = c.ewm(span=n, adjust=False).mean()
@@ -96,15 +101,25 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     tag_lo = l.rolling(3).min()
     tag_hi = h.rolling(3).max()
+    df["ext20"] = (c - df["ema20"]) / df["atr"]   # how far close sits from EMA20
     strong_bull = ((body > 0) & (df["body_ratio"] >= BODY_RATIO_MIN)
                    & (df["body_atr"] >= BODY_ATR_MIN) & (df["close_up"] >= CLOSE_POS_MIN))
     strong_bear = ((body < 0) & (df["body_ratio"] >= BODY_RATIO_MIN)
                    & (df["body_atr"] >= BODY_ATR_MIN) & (df["close_dn"] >= CLOSE_POS_MIN))
     intraday = (df["t"] >= ENTRY_START) & (df["t"] <= ENTRY_END)
 
+    if body_atr_max is not None:                  # drop blow-off climax candles
+        ok = df["body_atr"] <= body_atr_max
+        strong_bull &= ok
+        strong_bear &= ok
+    not_ext_bull = (df["ext20"] <= ext_max) if ext_max is not None else True
+    not_ext_bear = (-df["ext20"] <= ext_max) if ext_max is not None else True
+
     df["sig"] = 0
-    df.loc[gate_bull & strong_bull & (tag_lo <= df["ema20"]) & intraday, "sig"] = 1
-    df.loc[gate_bear & strong_bear & (tag_hi >= df["ema20"]) & intraday, "sig"] = -1
+    df.loc[gate_bull & strong_bull & (tag_lo <= df["ema20"]) & intraday
+           & not_ext_bull, "sig"] = 1
+    df.loc[gate_bear & strong_bear & (tag_hi >= df["ema20"]) & intraday
+           & not_ext_bear, "sig"] = -1
     return df
 
 
@@ -173,18 +188,20 @@ def simulate(df: pd.DataFrame, exit_style: str) -> pd.DataFrame:
             exit_px = c[min(j, n - 1)]
         R = ((exit_px - entry) if s == 1 else (entry - exit_px)) / risk
         trades.append({"date": date[e], "side": "long" if s == 1 else "short",
-                       "R": R, "body_atr": body_atr[i], "fan": abs(fan[i])})
+                       "R": R, "risk_pts": risk,
+                       "body_atr": body_atr[i], "fan": abs(fan[i])})
         i = j + 1
     return pd.DataFrame(trades)
 
 
-def stats(tr: pd.DataFrame) -> dict:
+def stats(tr: pd.DataFrame, cost_points: float = 0.0) -> dict:
     if tr.empty:
         return {"n": 0, "win%": 0, "expR": 0, "totR": 0, "pf": 0}
-    wins, losses = tr["R"][tr["R"] > 0], tr["R"][tr["R"] <= 0]
+    r = tr["R"] - (cost_points / tr["risk_pts"] if cost_points else 0.0)
+    wins, losses = r[r > 0], r[r <= 0]
     gl = -losses.sum()
-    return {"n": len(tr), "win%": len(wins) / len(tr) * 100,
-            "expR": tr["R"].mean(), "totR": tr["R"].sum(),
+    return {"n": len(r), "win%": len(wins) / len(r) * 100,
+            "expR": r.mean(), "totR": r.sum(),
             "pf": (wins.sum() / gl) if gl > 0 else float("inf")}
 
 
@@ -193,50 +210,65 @@ def _row(label: str, st: dict) -> str:
             f"exp={st['expR']:+.3f}R  PF={st['pf']:4.2f}  total={st['totR']:+7.1f}R")
 
 
-def main() -> None:
-    con = duckdb.connect(str(DB_PATH), read_only=True)
-    df = add_features(load_3min(con))
-    con.close()
-    print(f"3-min bars: {len(df):,}  ({df['ts_minute'].min()} -> {df['ts_minute'].max()})")
-    print(f"raw signals: {(df['sig']!=0).sum()}  "
-          f"(long {(df['sig']==1).sum()} / short {(df['sig']==-1).sum()})\n")
-
-    print("Exit-style comparison (1R = risk to stop):")
-    print("=" * 70)
-    results = {}
-    for style in ("r2_ema", "ema_trail", "timebox"):
-        tr = simulate(df, style)
-        results[style] = tr
-        print(_row(style, stats(tr)))
-    print()
-
-    # pick best by expectancy among styles with a usable sample
-    usable = {k: v for k, v in results.items() if len(v) >= 100}
-    best = max(usable or results, key=lambda k: stats(results[k])["expR"])
-    tr = results[best]
-    print(f"Best by expectancy: '{best}'")
-    print("-" * 70)
-    for side in ("long", "short"):
-        print(_row(side, stats(tr[tr["side"] == side])))
-
-    # confidence: does a stronger candle / wider fan grade better?
-    tr = tr.copy()
-    tr["strength"] = tr["body_atr"] * tr["fan"]
-    tr["q"] = pd.qcut(tr["strength"], 5, labels=["S1", "S2", "S3", "S4", "S5"],
-                      duplicates="drop")
-    print("\nExpectancy by signal-strength quintile (body_atr x fan):")
-    print("-" * 70)
-    for q, g in tr.groupby("q", observed=True):
-        print(_row(str(q), stats(g)))
-
-    # walk-forward out-of-sample (80/20 by date)
+def _oos(tr: pd.DataFrame, cost: float) -> None:
     days = np.sort(tr["date"].unique())
     cut = days[int(len(days) * 0.8)]
     ins, oos = tr[tr["date"] < cut], tr[tr["date"] >= cut]
-    print(f"\nWalk-forward (cut {cut}):")
+    print(f"  walk-forward (cut {cut}, net):")
+    print("   " + _row("in-sample", stats(ins, cost)))
+    print("   " + _row("out-sample", stats(oos, cost)))
+
+
+def main() -> None:
+    con = duckdb.connect(str(DB_PATH), read_only=True)
+    base_df = load_3min(con)
+    con.close()
+    base = add_features(base_df.copy())
+    print(f"3-min bars: {len(base):,}  ({base['ts_minute'].min()} -> {base['ts_minute'].max()})")
+
+    # 1) baseline exit-style comparison (gross)
+    print(f"\nBASELINE  signals={(base['sig']!=0).sum()}  "
+          f"(long {(base['sig']==1).sum()} / short {(base['sig']==-1).sum()})")
+    print("Exit-style comparison (gross, 1R = risk to stop):")
+    print("=" * 70)
+    results = {st: simulate(base, st) for st in ("r2_ema", "ema_trail", "timebox")}
+    for st, tr in results.items():
+        print(_row(st, stats(tr)))
+    best = max((k for k in results if len(results[k]) >= 100),
+               key=lambda k: stats(results[k])["expR"])
+    print(f"-> best exit: '{best}'")
+
+    # 2) extension-capped variant on the best exit
+    capped = add_features(base_df.copy(), ext_max=EXT_MAX, body_atr_max=BODY_ATR_MAX)
+    tr_b, tr_c = results[best], simulate(capped, best)
+    print(f"\nEXTENSION CAP  (close within {EXT_MAX}*ATR of EMA20, body<= {BODY_ATR_MAX}*ATR)")
+    print(f"signals={(capped['sig']!=0).sum()}  on exit '{best}':")
+    print("=" * 70)
+    print(_row("baseline gross", stats(tr_b)))
+    print(_row("capped  gross", stats(tr_c)))
+    print(_row(f"baseline net@{COST_POINTS}", stats(tr_b, COST_POINTS)))
+    print(_row(f"capped  net@{COST_POINTS}", stats(tr_c, COST_POINTS)))
+
+    # 3) cost sensitivity on the capped variant
+    print(f"\nCost sensitivity (capped, '{best}'):")
     print("-" * 70)
-    print(_row("in-sample", stats(ins)))
-    print(_row("out-sample", stats(oos)))
+    for cp in (0.0, 1.0, 2.0, 3.0, 4.0):
+        print(_row(f"cost {cp:.0f} pts", stats(tr_c, cp)))
+
+    # 4) per-side + strength quintile + OOS, all NET of cost, capped
+    print(f"\nCapped, net @ {COST_POINTS} pts:")
+    print("-" * 70)
+    for side in ("long", "short"):
+        print(_row(side, stats(tr_c[tr_c["side"] == side], COST_POINTS)))
+    g = tr_c.copy()
+    g["strength"] = g["body_atr"] * g["fan"]
+    g["q"] = pd.qcut(g["strength"], 5, labels=["S1", "S2", "S3", "S4", "S5"],
+                     duplicates="drop")
+    print("  strength quintile (body_atr x fan):")
+    for q, gg in g.groupby("q", observed=True):
+        print("   " + _row(str(q), stats(gg, COST_POINTS)))
+    print()
+    _oos(tr_c, COST_POINTS)
 
 
 if __name__ == "__main__":
