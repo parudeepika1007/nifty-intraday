@@ -185,10 +185,31 @@ table{width:100%;border-collapse:collapse;margin-top:16px;font-size:12.5px}
 th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--bd)}
 th{color:var(--mut);font-weight:500}td:first-child,th:first-child{text-align:left}
 .foot{color:var(--mut);font-size:12px;margin-top:14px}
+.helpbtn{font:inherit;font-size:12px;background:#1c2430;color:var(--cool);border:1px solid var(--bd);
+border-radius:6px;padding:4px 10px;cursor:pointer;vertical-align:middle;margin-left:10px}
+.helpbtn:hover{background:#22303f}
+.info{cursor:pointer;color:var(--mut);border:1px solid var(--bd);border-radius:50%;width:17px;height:17px;
+display:inline-block;text-align:center;line-height:15px;font-size:11px;font-style:italic;font-weight:700;margin-left:7px}
+.info:hover{color:var(--cool);border-color:var(--cool)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;z-index:50;overflow:auto}
+.modal.show{display:block}
+.modalbox{max-width:780px;margin:36px auto;background:var(--card);border:1px solid var(--bd);border-radius:12px}
+.modalhd{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--bd);padding:15px 22px;
+display:flex;justify-content:space-between;align-items:center;border-radius:12px 12px 0 0}
+.modalhd h2{margin:0;font-size:16px}
+.close{cursor:pointer;font-size:24px;color:var(--mut);background:none;border:0;line-height:1}
+.close:hover{color:var(--tx)}
+.mbody{padding:4px 22px 22px}
+.metric{border-bottom:1px solid var(--bd);padding:16px 0;scroll-margin-top:64px}
+.metric:last-child{border:0}.metric h3{margin:0 0 4px;font-size:14.5px}
+.metric p{margin:6px 0;font-size:13px;color:#c9d3df}
+.formula{font-family:ui-monospace,Consolas,monospace;background:#0a0d13;border:1px solid var(--bd);
+border-radius:6px;padding:9px 11px;font-size:12.5px;color:var(--cool);margin:8px 0;white-space:pre-wrap}
+.ex{font-size:12.5px;color:var(--mut)}.ex b{color:var(--tx)}
 </style></head><body><div class=wrap>
 <div class=banner>⚠ RESEARCH MODE — observation only, <b>no orders are placed</b>. These signals
 are <b>not validated</b> (they fail / haven't met CLAUDE.md §8). Use for intuition, not trading.</div>
-<h1>NIFTY Intraday — Live Signals</h1>
+<h1>NIFTY Intraday — Live Signals<button id=helpbtn class=helpbtn>？ How to read this</button></h1>
 <div class=sub>Idea #2 Basis Regime &nbsp;·&nbsp; Idea #3 Option Net Delta &nbsp;·&nbsp; all times IST</div>
 <div class=status>
 <div><span id=mk class="dot closed"></span><b id=mkt>—</b></div>
@@ -198,7 +219,7 @@ are <b>not validated</b> (they fail / haven't met CLAUDE.md §8). Use for intuit
 <div>Opt expiry <b id=exp>—</b></div>
 </div>
 <div class=grid>
-<div class=card><h2>#2 · Basis Regime</h2>
+<div class=card><h2>#2 · Basis Regime<span class=info data-help=m-z>i</span></h2>
 <div><span class=big id=basis>—</span> <span class=unit>pts (fut − spot)</span></div>
 <div class=gauge><div class=gmid></div><div class=gz id=gz style="left:50%"></div></div>
 <div class=row><span>basis-z (vs rolling mean)</span><b id=z>—</b></div>
@@ -206,7 +227,7 @@ are <b>not validated</b> (they fail / haven't met CLAUDE.md §8). Use for intuit
 <div class=desc>How rich/cheap the futures premium is vs its own last-hour mean.
 Stretched z (±2σ) flags institutional repositioning the spot hasn't caught up to.
 The <b>flip through zero with momentum</b> is the directional tell, not the level itself.</div></div>
-<div class=card><h2>#3 · Option Net Delta</h2>
+<div class=card><h2>#3 · Option Net Delta<span class=info data-help=m-delta>i</span></h2>
 <div><span class=big id=nd>—</span> <span class=unit>mn (Σ δ·OI)</span></div>
 <div class=row><span>change since last tick</span><b id=dnet>—</b></div>
 <div class=row><span>put/call OI ratio</span><b id=pcr>—</b></div>
@@ -214,7 +235,7 @@ The <b>flip through zero with momentum</b> is the directional tell, not the leve
 <div class=desc>Aggregate delta of all open option OI on the nearest expiry. The
 <b>change per tick</b> is the signal — a sharp jump = fresh call-buying / put-selling
 (bullish), a sharp drop = the reverse. The absolute level is noisy.</div></div>
-<div class="card verdict"><h2>Combined Directional Read (hypothesis)</h2>
+<div class="card verdict"><h2>Combined Directional Read (hypothesis)<span class=info data-help=m-read>i</span></h2>
 <div class=big id=verdict>—</div>
 <div class=desc id=reason style="border:0;color:var(--tx)">—</div></div>
 </div>
@@ -222,7 +243,65 @@ The <b>flip through zero with momentum</b> is the directional tell, not the leve
 <th>netΔ(mn)</th><th>Δ/tick</th><th>PCR</th><th>read</th></tr></thead>
 <tbody id=hist></tbody></table>
 <div class=foot id=foot>connecting…</div>
-</div><script>
+</div>
+<div class=modal id=modal><div class=modalbox>
+<div class=modalhd><h2>How to read these signals</h2><button class=close id=closebtn>×</button></div>
+<div class=mbody>
+<div class=metric><h3>The idea in one line</h3>
+<p>Two crowds leave footprints: <b>institutions</b> trade index <b>futures</b>, the
+<b>options crowd</b> shows up in net delta. When <b>both turn the same way at the same
+moment</b>, NIFTY tends to follow for the next 15–30 min. That confluence is the edge we hunt.</p></div>
+
+<div class=metric><h3>spot &amp; fut</h3>
+<p><b>spot</b> = the NIFTY index right now. <b>fut</b> = the near-month (June) futures price —
+where institutions are willing to trade the index.</p></div>
+
+<div class=metric><h3>basis</h3>
+<div class=formula>basis = fut − spot</div>
+<p>Futures normally trade a little <i>above</i> spot (cost of carry), so a positive basis
+is normal. The raw number is <b>not</b> the signal — what matters is whether it's unusual,
+which the z-score measures.</p></div>
+
+<div class=metric id=m-z><h3>basis-z &nbsp;— the #2 signal</h3>
+<div class=formula>basis_z = (basis − mean(last 60 basis)) / std(last 60 basis)</div>
+<p>"Is the premium <b>weird right now</b> vs its own last hour?" The 60-min window is seeded
+from today's 1-min bars so it's meaningful from the first tick.</p>
+<p><b>z ≈ 0</b> → completely normal. &nbsp; <b>z ≥ +2</b> → premium unusually <span class=cold>rich</span>.
+&nbsp; <b>z ≤ −2</b> → unusually <span class=cold>cheap</span>.</p>
+<p class=ex>Direction comes from the <b>flip through zero</b>, not the level: z swinging
+<b>negative → positive</b> = institutions just turned buyers (bullish); positive → negative = sellers (bearish).
+A steadily-rich z means the move is already priced in — no edge.</p></div>
+
+<div class=metric id=m-delta><h3>netΔ(mn) &amp; Δ/tick &nbsp;— the #3 signal</h3>
+<div class=formula>netΔ = Σ over all strikes ( δ_call × OI_call + δ_put × OI_put )
+       ( shown in millions; put delta is negative )
+Δ/tick = netΔ(now) − netΔ(previous tick)</div>
+<p><b>netΔ</b> is the aggregate directional lean of every open option position on the
+nearest expiry. Dhan returns the greeks directly, so no maths assumptions on our side.</p>
+<p>The <b>level is noisy — ignore it.</b> The signal is <b>Δ/tick</b>: a sharp <span class=cold>+</span> jump
+= fresh call-buying / put-selling (bullish); a sharp <span class=hot>−</span> drop = the reverse.
+"Sharp" currently = bigger than ±1.5 mn in one tick (a heuristic, not yet calibrated).</p></div>
+
+<div class=metric><h3>PCR</h3>
+<div class=formula>PCR = total put OI / total call OI</div>
+<p>Background sentiment only. Rising = more puts (defensive/hedging), falling = more calls.
+Supporting context, never a trigger on its own.</p></div>
+
+<div class=metric id=m-read><h3>Combined Directional Read</h3>
+<p>The verdict banner fires only on <b>confluence</b> of the two ⭐ signals:</p>
+<div class=formula>LONG LEAN   : basis_z crosses 0 upward   AND  Δ/tick > +1.5 mn
+SHORT LEAN  : basis_z crosses 0 downward AND  Δ/tick < −1.5 mn
+CONFLICT    : basis &amp; options disagree (one up, one down) → stand aside
+PRICED      : |z| ≥ 2 but flat, Δ/tick small → move already in, no entry
+NO SIGNAL   : no confluence → do nothing (this is most of the time)</div>
+<p class=ex><b>If/when it turns LONG/SHORT, the hypothesised trade:</b> take the June future
+(or an at-the-money option) in that direction; stop at the recent few-minute low/high;
+exit at a target <b>or</b> after 30 minutes, whichever first; risk a small fixed amount.</p>
+<p class=ex style="color:var(--warn)">⚠ Not validated. The basis backtest scored below the
+§8 bar and net-delta has no backtest yet. The banner is a hypothesis lighting up, not a tested
+edge — don't trade real money on it until we've recorded ticks and validated forward.</p></div>
+</div></div></div>
+<script>
 function cls(el,c){el.className=el.className.replace(/\\b(hot|cold|warm|cool|neutral|long|short|warn)\\b/g,'').trim();if(c)el.classList.add(c);}
 async function tick(){
  try{const r=await fetch('/api/signals');const d=await r.json();const t=d.latest,m=d.meta;
@@ -253,6 +332,14 @@ async function tick(){
   +' · sharp-shift threshold ±'+m.dshift+' mn'+(d.error?' · last error: '+d.error:'');
  }catch(e){document.getElementById('foot').textContent='fetch error: '+e;}
 }
+const modal=document.getElementById('modal');
+function openModal(a){modal.classList.add('show');if(a){const el=document.getElementById(a);if(el)el.scrollIntoView({block:'start'});}}
+function closeModal(){modal.classList.remove('show');}
+document.getElementById('helpbtn').onclick=()=>openModal();
+document.getElementById('closebtn').onclick=closeModal;
+modal.addEventListener('click',e=>{if(e.target===modal)closeModal();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+document.querySelectorAll('[data-help]').forEach(el=>el.onclick=()=>openModal(el.getAttribute('data-help')));
 tick();setInterval(tick,3000);
 </script></body></html>"""
 
